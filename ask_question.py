@@ -42,9 +42,11 @@ SEARCH_WIKIPEDIA_TOOL = {
         "fewer than 10 results (or zero) means there are no further pages.\n"
         "\n"
         "2. FULL ARTICLE: pass \"article: <exact title>\", e.g. \"article: Eiffel Tower\". "
-        "Returns just that one article with its full plain-text body (can be long). "
-        "Use this when the intro from search mode wasn't detailed enough — typically "
-        "after a search has surfaced the right title. `page` is ignored in this mode.\n"
+        "Returns that one article as raw MediaWiki wikitext, which preserves tables "
+        "({| class=\"wikitable\" ... |}), infoboxes, lists, and references — content "
+        "the search-mode intros omit. Articles can be long. Use this when the intro "
+        "wasn't detailed enough, e.g. when you need data that lives in a table. "
+        "`page` is ignored in this mode.\n"
         "\n"
         "Typical workflow: search to find the right article(s), paging if needed; then "
         "request the full article if you need details beyond the intro."
@@ -100,6 +102,31 @@ def format_search_results(results: list[dict], start_index: int = 1) -> str:
     return "\n\n".join(sections)
 
 
+def _serialize_block(block: object) -> dict | str:
+    """SDK content blocks are pydantic models; our own tool_result blocks are
+    plain dicts. Normalize both to YAML-safe values."""
+    if isinstance(block, (dict, str)):
+        return block
+    if hasattr(block, "model_dump"):
+        return block.model_dump()
+    return str(block)
+
+
+def _serialize_messages(messages: list[dict]) -> list[dict]:
+    """Faithful, replayable transcript: every turn including assistant reasoning,
+    tool_use inputs, and the full tool_result content the model actually saw."""
+    out = []
+    for m in messages:
+        content = m["content"]
+        if isinstance(content, str):
+            out.append({"role": m["role"], "content": content})
+        else:
+            out.append(
+                {"role": m["role"], "content": [_serialize_block(b) for b in content]}
+            )
+    return out
+
+
 def run_agent(
     client: Anthropic,
     prompt: str,
@@ -132,12 +159,12 @@ def run_agent(
         usage["input_tokens"] += resp.usage.input_tokens
         usage["output_tokens"] += resp.usage.output_tokens
         stop_reason = resp.stop_reason
+        messages.append({"role": "assistant", "content": resp.content})
 
         if stop_reason != "tool_use":
             final_text = "\n".join(b.text for b in resp.content if b.type == "text")
             break
 
-        messages.append({"role": "assistant", "content": resp.content})
         tool_results = []
         for block in resp.content:
             if block.type != "tool_use":
@@ -173,6 +200,7 @@ def run_agent(
     return {
         "response": final_text,
         "tool_log": tool_log,
+        "transcript": _serialize_messages(messages),
         "usage": usage,
         "stop_reason": stop_reason,
         "iterations": iteration,

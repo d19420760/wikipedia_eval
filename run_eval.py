@@ -5,6 +5,7 @@ keeping the artifact-under-test fully isolated from the eval driver. The judge r
 in-process here (the evaluator, not the artifact). Judge always uses Opus.
 """
 
+import json
 import re
 import statistics
 import subprocess
@@ -123,17 +124,47 @@ def _run_ask_question(
         tmp_path.unlink(missing_ok=True)
 
 
-def _build_judge_user_message(question: dict, ask_payload: dict) -> str:
+def _render_transcript(transcript: list[dict]) -> str:
+    """Render the full captured conversation into readable text for the judge,
+    including the verbatim Wikipedia content the agent saw (search extracts and
+    full article bodies)."""
+    if not transcript:
+        return "(no transcript captured)"
+    blocks = []
+    for m in transcript:
+        role = m.get("role", "?")
+        content = m.get("content")
+        if isinstance(content, str):
+            blocks.append(f"[{role}]\n{content}")
+            continue
+        for b in content or []:
+            btype = b.get("type")
+            if btype == "text":
+                blocks.append(f"[{role}]\n{b.get('text', '')}")
+            elif btype == "tool_use":
+                args = json.dumps(b.get("input", {}), ensure_ascii=False)
+                blocks.append(f"[{role}] calls {b.get('name')}({args})")
+            elif btype == "tool_result":
+                blocks.append(f"[tool_result]\n{b.get('content', '')}")
+            else:
+                blocks.append(f"[{role}] {btype}: {b}")
+    return "\n\n".join(blocks)
+
+
+def _tool_call_summary(ask_payload: dict) -> list[str]:
     tool_log = ask_payload.get("tool_log") or []
     if not tool_log:
-        tool_lines = ["(no Wikipedia searches were performed)"]
-    else:
-        tool_lines = []
-        for i, call in enumerate(tool_log, start=1):
-            titles = ", ".join(call.get("result_titles") or []) or "(no results)"
-            tool_lines.append(
-                f"{i}. query={call.get('query')!r} -> {call.get('num_results', 0)} hits: {titles}"
-            )
+        return ["(no Wikipedia searches were performed)"]
+    lines = []
+    for i, call in enumerate(tool_log, start=1):
+        titles = ", ".join(call.get("result_titles") or []) or "(no results)"
+        lines.append(
+            f"{i}. query={call.get('query')!r} -> {call.get('num_results', 0)} hits: {titles}"
+        )
+    return lines
+
+
+def _build_judge_user_message(question: dict, ask_payload: dict, eval_type: str) -> str:
     parts = [
         "<question>", question["question"], "</question>",
         "",
@@ -141,10 +172,17 @@ def _build_judge_user_message(question: dict, ask_payload: dict) -> str:
         "",
         "<answer>", ask_payload.get("response") or "(empty)", "</answer>",
         "",
-        "<tool_calls>",
-        *tool_lines,
-        "</tool_calls>",
     ]
+    # Correctness needs the source material to verify grounding; safety/tone only
+    # need to see what the agent did, so they get the lighter summary.
+    if eval_type == "correctness":
+        parts += [
+            "<transcript>",
+            _render_transcript(ask_payload.get("transcript") or []),
+            "</transcript>",
+        ]
+    else:
+        parts += ["<tool_calls>", *_tool_call_summary(ask_payload), "</tool_calls>"]
     return "\n".join(parts)
 
 
@@ -189,6 +227,7 @@ def _process_one(
         "category": q["category"],
         "answer": ask_payload.get("response"),
         "tool_log": ask_payload.get("tool_log") or [],
+        "transcript": ask_payload.get("transcript") or [],
         "ask_usage": ask_payload.get("usage"),
         "ask_stop_reason": ask_payload.get("stop_reason"),
         "ask_iterations": ask_payload.get("iterations"),
@@ -201,8 +240,8 @@ def _process_one(
         for et in EVAL_TYPES:
             result["scores"][et] = None
     else:
-        user_message = _build_judge_user_message(q, ask_payload)
         for et in EVAL_TYPES:
+            user_message = _build_judge_user_message(q, ask_payload, et)
             judge_result = _judge(judge_client, eval_prompts[et], user_message, temperature)
             result["scores"][et] = judge_result["score"]
             result["judge_responses"][et] = judge_result["response"]
@@ -300,6 +339,7 @@ def cli(
                     "category": q["category"],
                     "answer": None,
                     "tool_log": [],
+                    "transcript": [],
                     "ask_usage": None,
                     "ask_stop_reason": None,
                     "ask_iterations": None,

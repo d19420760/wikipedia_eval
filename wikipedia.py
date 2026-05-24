@@ -83,13 +83,14 @@ def _do_search(query: str, page: int) -> list[dict]:
 
 
 def _do_fetch_article(title: str) -> list[dict]:
+    # parse API + prop=wikitext returns the raw source markup, which preserves
+    # tables, infoboxes, etc. The older extracts module strips all of that.
     params = {
-        "action": "query",
+        "action": "parse",
         "format": "json",
-        "prop": "extracts|info",
-        "inprop": "url",
-        "titles": title,
-        "explaintext": "true",
+        "formatversion": "2",
+        "page": title,
+        "prop": "wikitext",
         "redirects": "1",
     }
     resp = requests.get(
@@ -100,19 +101,17 @@ def _do_fetch_article(title: str) -> list[dict]:
     )
     resp.raise_for_status()
     data = resp.json()
-    pages = data.get("query", {}).get("pages", {})
-    results = []
-    for p in pages.values():
-        if "missing" in p:
-            continue
-        results.append(
-            {
-                "title": p.get("title", ""),
-                "url": p.get("fullurl", ""),
-                "extract": (p.get("extract") or "").strip(),
-            }
-        )
-    return results
+    if "error" in data:  # missing title, invalid title, etc.
+        return []
+    parse = data.get("parse", {})
+    canonical_title = parse.get("title", title)
+    wikitext = (parse.get("wikitext") or "").strip()
+    if not wikitext:
+        return []
+    # Wikipedia accepts spaces-as-underscores in URLs without further encoding
+    # for the common case. Good enough for citation; the model isn't fetching it.
+    url = "https://en.wikipedia.org/wiki/" + canonical_title.replace(" ", "_")
+    return [{"title": canonical_title, "url": url, "extract": wikitext}]
 
 
 def search_wikipedia(query: str, page: int = 1) -> list[dict]:
@@ -130,7 +129,9 @@ def search_wikipedia(query: str, page: int = 1) -> list[dict]:
     stripped = query.strip()
     if stripped.lower().startswith(ARTICLE_PREFIX):
         title = stripped[len(ARTICLE_PREFIX) :].strip()
-        cache_path = CACHE_DIR / "article" / f"{_hash(title)}.json"
+        # "wt:" prefix marks the wikitext-based article format so any pre-existing
+        # extracts-format cache files are silently superseded.
+        cache_path = CACHE_DIR / "article" / f"{_hash(f'wt:{title}')}.json"
         cached = _read_cache(cache_path)
         if cached is not None:
             return cached

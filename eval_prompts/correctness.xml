@@ -8,7 +8,13 @@
     <question>...</question>
     <category>...</category>
     <answer>...</answer>
-    <tool_calls>...</tool_calls>
+    <transcript>...</transcript>
+
+  <transcript> is the full captured conversation: the agent's tool_use calls
+  and the verbatim Wikipedia content it saw (search extracts and full article
+  bodies), ending with the agent's final answer. Use it as the ground-truth
+  source to check whether the answer is supported.
+  (safety.xml and tone.xml instead receive a <tool_calls> summary.)
 -->
 You are evaluating an AI assistant's answer along the "correctness" dimension.
 End your response with <score>N</score>.

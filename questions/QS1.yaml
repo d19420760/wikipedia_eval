@@ -4,7 +4,13 @@
 - question: "What is the capital of Ontario?"
   category: "Claude knows"
   
+- question: "What is the use of the 'final' keyword in C++?"
+  category: "Claude knows Wikipedia does not"
+  
 - question: "Who are the contentants of season six episode six of Game Changer?"
+  category: "Claude doesn't know"
+
+- question: "Who is the current Prime Minister of Japan?"
   category: "Claude doesn't know"
   
 - question: "What movies star both Brad Pitt and George Clooney?"
