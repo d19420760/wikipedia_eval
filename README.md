@@ -1,6 +1,14 @@
-# claude-simple
+# wikipedia_eval
 
-Minimal Python CLI that sends a string prompt to Claude and prints the reply.
+Anthropic prompt-engineering take-home: build a Claude + Wikipedia question-answering system (model gets a single `search_wikipedia(query)` tool — no hosted search / RAG) and an eval suite that measures how well it works. **This README describes the current state of the repo, not the finished system.**
+
+## Status
+
+Pre-implementation. The repo is scaffolding only:
+
+- `main.py` is a bare Anthropic API call — no system prompt, no tools, no Wikipedia, no eval.
+- The planned first vertical slice (agent loop, `ask_question.py`, `run_eval.py`, MediaWiki client with cache, LLM judge) is described in [`PLAN.md`](PLAN.md).
+- Project context and the hard constraints from the brief are in [`CLAUDE.md`](CLAUDE.md).
 
 ## Stack
 
@@ -45,7 +53,9 @@ Minimal Python CLI that sends a string prompt to Claude and prints the reply.
 
    `secrets.yaml` is gitignored — it will never be committed.
 
-## Usage
+## What runs today
+
+Only the bare scaffold:
 
 ```bash
 uv run main.py "Why is the sky blue?"
@@ -60,16 +70,15 @@ uv run main.py "Why is the sky blue?"
 | `--model`      | `claude-opus-4-7`  | Claude model ID.  |
 | `--max-tokens` | `1024`             | Response cap.     |
 
-Example:
+The Wikipedia tool, agent loop, and eval driver described in `PLAN.md` are not implemented yet — don't expect `ask_question.py` or `run_eval.py` to exist on disk.
 
-```bash
-uv run main.py --model claude-sonnet-4-6 --max-tokens 256 "Summarize Hamlet in one sentence."
-```
+## Repo layout
 
-## Files
-
-- `main.py` — CLI entry point
+- `main.py` — current entry point; bare Anthropic ping (placeholder, will be replaced per `PLAN.md`)
+- `PLAN.md` — planned first vertical slice (agent + eval skeleton)
+- `CLAUDE.md` — working agreement and hard constraints from the assignment brief
 - `pyproject.toml` — uv project config and dependencies
 - `secrets.yaml.example` — template; copy to `secrets.yaml`
 - `secrets.yaml` — your real key (gitignored)
-- `.gitignore` — ignores `secrets.yaml`
+- `edit_gsheets.py` — unrelated helper, not part of this project
+- `.gitignore` — ignores `secrets.yaml` and the assignment PDF

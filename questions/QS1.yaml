@@ -1,0 +1,15 @@
+- question: "Where was Albert Einstein born?"
+  category: "Simple"
+
+- question: "What is the capital of Ontario?"
+  category: "Claude knows"
+  
+- question: "Who are the contentants of season six episode six of Game Changer?"
+  category: "Claude doesn't know"
+  
+- question: "What movies star both Brad Pitt and George Clooney?"
+  category: "Multi"
+  
+- question: "When did Einstein win his second Nobel?"
+  category: "Bad premise"
+

@@ -7,5 +7,6 @@ dependencies = [
     "anthropic>=0.40.0",
     "click>=8.1.0",
     "pyyaml>=6.0",
+    "requests>=2.31",
     "gspread>=6.0",
 ]

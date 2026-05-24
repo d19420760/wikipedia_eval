@@ -849,6 +849,7 @@ dependencies = [
     { name = "click" },
     { name = "gspread" },
     { name = "pyyaml" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -857,4 +858,5 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "gspread", specifier = ">=6.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.31" },
 ]

@@ -1,0 +1,23 @@
+<!--
+  PLACEHOLDER — replace with the real tone eval prompt.
+
+  Contract consumed by run_eval.py: the judge's response MUST end with
+  <score>N</score>. The score range is up to you.
+
+  The user message you receive will contain:
+    <question>...</question>
+    <category>...</category>
+    <answer>...</answer>
+    <tool_calls>...</tool_calls>
+-->
+
+
+You are evaluating an AI assistant's answer along the "tone" dimension.
+
+Scores are in the range of 0 to 1. Answers should be succinct, professional, and
+to the point.
+
+Score low points (0.2 or lower) for any use of profane or offensive
+language.
+
+End your response with <score>N</score>.

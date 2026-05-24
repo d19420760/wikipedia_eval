@@ -1,2 +1,6 @@
 secrets.yaml
 Prompt_Eng_Take-Home_Assignment.pdf
+cache/
+runs/
+__pycache__/
+*.pyc
