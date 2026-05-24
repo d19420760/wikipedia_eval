@@ -9,13 +9,15 @@ The query string is overloaded to support two modes:
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import requests
 
 API_URL = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "wikipedia_eval/0.1 (Anthropic prompt-eng take-home)"
-TOP_N = 5
+TOP_N = 10
 TIMEOUT_SECONDS = 30
 CACHE_DIR = Path(__file__).parent / "cache" / "wikipedia"
 ARTICLE_PREFIX = "article:"
@@ -26,19 +28,28 @@ def _hash(text: str) -> str:
 
 
 def _read_cache(path: Path) -> list[dict] | None:
-    if not path.exists():
+    # try/except (not exists()-then-open) so a concurrent replace can't race us.
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
         return None
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 def _write_cache(path: Path, results: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    # Write to a unique temp file in the same directory, then atomic rename.
+    # os.replace is atomic on POSIX and Windows for same-volume renames, so
+    # concurrent writers never tear bytes and readers see old-or-new, never partial.
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
+    ) as tf:
+        json.dump(results, tf, ensure_ascii=False, indent=2)
+        tmp_path = Path(tf.name)
+    os.replace(tmp_path, path)
 
 
-def _do_search(query: str) -> list[dict]:
+def _do_search(query: str, page: int) -> list[dict]:
     params = {
         "action": "query",
         "format": "json",
@@ -47,6 +58,7 @@ def _do_search(query: str) -> list[dict]:
         "generator": "search",
         "gsrsearch": query,
         "gsrlimit": TOP_N,
+        "gsroffset": (page - 1) * TOP_N,
         "exintro": "true",
         "explaintext": "true",
     }
@@ -103,13 +115,18 @@ def _do_fetch_article(title: str) -> list[dict]:
     return results
 
 
-def search_wikipedia(query: str) -> list[dict]:
+def search_wikipedia(query: str, page: int = 1) -> list[dict]:
     """Look things up on English Wikipedia.
 
-    - "article: <title>"  -> single full-text article (or empty list if missing)
-    - anything else       -> top {TOP_N} search hits with intro extracts
+    - "article: <title>"  -> single full-text article (or empty list if missing).
+                             `page` is ignored.
+    - anything else       -> top {TOP_N} search hits with intro extracts.
+                             `page` is 1-based: page=2 returns hits 11-20, etc.
+                             Returns an empty (or short) list when out of pages.
     Returns [{title, url, extract}, ...].
     """
+    if page < 1:
+        page = 1
     stripped = query.strip()
     if stripped.lower().startswith(ARTICLE_PREFIX):
         title = stripped[len(ARTICLE_PREFIX) :].strip()
@@ -121,10 +138,11 @@ def search_wikipedia(query: str) -> list[dict]:
         _write_cache(cache_path, results)
         return results
 
-    cache_path = CACHE_DIR / "search" / f"{_hash(stripped)}.json"
+    # Cache key includes TOP_N and page so the cache auto-invalidates on either.
+    cache_path = CACHE_DIR / "search" / f"{_hash(f'top{TOP_N}:p{page}:{stripped}')}.json"
     cached = _read_cache(cache_path)
     if cached is not None:
         return cached
-    results = _do_search(stripped)
+    results = _do_search(stripped, page)
     _write_cache(cache_path, results)
     return results

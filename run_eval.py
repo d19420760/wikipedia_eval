@@ -10,6 +10,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import click
 import yaml
 from anthropic import Anthropic
 
-from ask_question import MODEL_IDS, load_api_key
+from ask_question import DEFAULT_TEMPERATURE, MODEL_IDS, load_api_key
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -42,6 +43,7 @@ JUDGE_MODEL = "claude-opus-4-7"
 JUDGE_MAX_TOKENS = 2048
 EVAL_TYPES = ["safety", "correctness", "tone"]
 DEFAULT_ASK_MODEL = "sonnet"
+DEFAULT_WORKERS = 1
 SCORE_RE = re.compile(r"<score>\s*(-?\d+(?:\.\d+)?)\s*</score>", re.IGNORECASE)
 
 
@@ -79,20 +81,28 @@ def _aggregates(values: list) -> dict:
     }
 
 
-def _run_ask_question(question: str, system_prompt_file: Path, ask_model: str) -> dict:
+def _run_ask_question(
+    question: str,
+    system_prompt_file: Path,
+    ask_model: str,
+    temperature: float | None,
+) -> dict:
     """Run ask_question.py as a subprocess; return its parsed YAML payload or an error dict."""
     with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tf:
         tmp_path = Path(tf.name)
     try:
+        args = [
+            sys.executable,
+            str(ASK_QUESTION_PATH),
+            question,
+            "--system-prompt-file", str(system_prompt_file),
+            "--model", ask_model,
+            "--output", str(tmp_path),
+        ]
+        if temperature is not None:
+            args.extend(["--temperature", str(temperature)])
         proc = subprocess.run(
-            [
-                sys.executable,
-                str(ASK_QUESTION_PATH),
-                question,
-                "--system-prompt-file", str(system_prompt_file),
-                "--model", ask_model,
-                "--output", str(tmp_path),
-            ],
+            args,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -138,13 +148,21 @@ def _build_judge_user_message(question: dict, ask_payload: dict) -> str:
     return "\n".join(parts)
 
 
-def _judge(client: Anthropic, eval_prompt: str, user_message: str) -> dict:
-    resp = client.messages.create(
-        model=JUDGE_MODEL,
-        max_tokens=JUDGE_MAX_TOKENS,
-        system=eval_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
+def _judge(
+    client: Anthropic,
+    eval_prompt: str,
+    user_message: str,
+    temperature: float | None,
+) -> dict:
+    kwargs = {
+        "model": JUDGE_MODEL,
+        "max_tokens": JUDGE_MAX_TOKENS,
+        "system": eval_prompt,
+        "messages": [{"role": "user", "content": user_message}],
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    resp = client.messages.create(**kwargs)
     text = "\n".join(b.text for b in resp.content if b.type == "text")
     return {
         "score": _extract_score(text),
@@ -154,6 +172,42 @@ def _judge(client: Anthropic, eval_prompt: str, user_message: str) -> dict:
             "output_tokens": resp.usage.output_tokens,
         },
     }
+
+
+def _process_one(
+    q: dict,
+    system_prompt_file: Path,
+    ask_model: str,
+    temperature: float | None,
+    eval_prompts: dict[str, str],
+    judge_client: Anthropic,
+) -> tuple[dict, dict]:
+    """Run a single question end-to-end. Returns (result_record, ask_payload)."""
+    ask_payload = _run_ask_question(q["question"], system_prompt_file, ask_model, temperature)
+    result = {
+        "question": q["question"],
+        "category": q["category"],
+        "answer": ask_payload.get("response"),
+        "tool_log": ask_payload.get("tool_log") or [],
+        "ask_usage": ask_payload.get("usage"),
+        "ask_stop_reason": ask_payload.get("stop_reason"),
+        "ask_iterations": ask_payload.get("iterations"),
+        "ask_error": ask_payload.get("_error"),
+        "scores": {},
+        "judge_responses": {},
+        "judge_usage": {},
+    }
+    if "_error" in ask_payload:
+        for et in EVAL_TYPES:
+            result["scores"][et] = None
+    else:
+        user_message = _build_judge_user_message(q, ask_payload)
+        for et in EVAL_TYPES:
+            judge_result = _judge(judge_client, eval_prompts[et], user_message, temperature)
+            result["scores"][et] = judge_result["score"]
+            result["judge_responses"][et] = judge_result["response"]
+            result["judge_usage"][et] = judge_result["usage"]
+    return result, ask_payload
 
 
 @click.command()
@@ -178,6 +232,19 @@ def _judge(client: Anthropic, eval_prompt: str, user_message: str) -> dict:
     help="Model used by ask_question (the artifact under evaluation). The judge always uses Opus.",
 )
 @click.option(
+    "--temperature",
+    default=DEFAULT_TEMPERATURE,
+    type=float,
+    help="Sampling temperature; applied to both the agent and the judge. Default: not sent (Claude 4.x deprecated this param).",
+)
+@click.option(
+    "--workers",
+    default=DEFAULT_WORKERS,
+    show_default=True,
+    type=int,
+    help="Max parallel question workers (each is a subprocess + 3 judge calls).",
+)
+@click.option(
     "--output",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
@@ -187,6 +254,8 @@ def cli(
     system_prompt_file: Path,
     questions_file: Path,
     ask_model: str,
+    temperature: float | None,
+    workers: int,
     output: Path | None,
 ) -> None:
     """Run the eval suite."""
@@ -207,46 +276,51 @@ def cli(
             )
 
     system_prompt_text = system_prompt_file.read_text(encoding="utf-8")
+    # Anthropic SDK uses httpx under the hood, which is thread-safe; one client
+    # is fine across worker threads.
     judge_client = Anthropic(api_key=load_api_key())
 
-    results = []
-    for i, q in enumerate(questions, start=1):
-        click.echo(f"[{i}/{len(questions)}] ({q['category']}) {q['question'][:80]}")
-        ask_payload = _run_ask_question(q["question"], system_prompt_file, ask_model)
-
-        result = {
-            "question": q["question"],
-            "category": q["category"],
-            "answer": ask_payload.get("response"),
-            "tool_log": ask_payload.get("tool_log") or [],
-            "ask_usage": ask_payload.get("usage"),
-            "ask_stop_reason": ask_payload.get("stop_reason"),
-            "ask_iterations": ask_payload.get("iterations"),
-            "ask_error": ask_payload.get("_error"),
-            "scores": {},
-            "judge_responses": {},
-            "judge_usage": {},
+    results: list = [None] * len(questions)
+    n = len(questions)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futures = {
+            ex.submit(
+                _process_one,
+                q, system_prompt_file, ask_model, temperature, eval_prompts, judge_client,
+            ): (i, q)
+            for i, q in enumerate(questions)
         }
-
-        if "_error" in ask_payload:
-            click.echo(f"  ask_question failed: {ask_payload['_error']}")
-            if ask_payload.get("_stderr"):
-                click.echo(f"  stderr: {ask_payload['_stderr'][:200]}")
-            for et in EVAL_TYPES:
-                result["scores"][et] = None
-        else:
-            user_message = _build_judge_user_message(q, ask_payload)
-            for et in EVAL_TYPES:
-                judge_result = _judge(judge_client, eval_prompts[et], user_message)
-                result["scores"][et] = judge_result["score"]
-                result["judge_responses"][et] = judge_result["response"]
-                result["judge_usage"][et] = judge_result["usage"]
-            scores_summary = "  ".join(
-                f"{et}={result['scores'][et]}" for et in EVAL_TYPES
-            )
-            click.echo(f"  {scores_summary}")
-
-        results.append(result)
+        for fut in as_completed(futures):
+            i, q = futures[fut]
+            try:
+                result, ask_payload = fut.result()
+            except Exception as e:
+                result = {
+                    "question": q["question"],
+                    "category": q["category"],
+                    "answer": None,
+                    "tool_log": [],
+                    "ask_usage": None,
+                    "ask_stop_reason": None,
+                    "ask_iterations": None,
+                    "ask_error": f"worker exception: {e!r}",
+                    "scores": {et: None for et in EVAL_TYPES},
+                    "judge_responses": {},
+                    "judge_usage": {},
+                }
+                ask_payload = {"_error": str(e)}
+            results[i] = result
+            # Single echo call to avoid interleaving lines across worker threads.
+            header = f"[{i+1}/{n}] ({q['category']}) {q['question'][:80]}"
+            if "_error" in ask_payload:
+                err = ask_payload["_error"]
+                stderr = (ask_payload.get("_stderr") or "")[:200]
+                click.echo(f"{header}\n  FAILED: {err}" + (f"\n  stderr: {stderr}" if stderr else ""))
+            else:
+                scores_summary = "  ".join(
+                    f"{et}={result['scores'][et]}" for et in EVAL_TYPES
+                )
+                click.echo(f"{header}\n  {scores_summary}")
 
     aggregates = {
         et: _aggregates([r["scores"].get(et) for r in results])
@@ -263,6 +337,8 @@ def cli(
             "timestamp": datetime.now().isoformat(),
             "ask_model": MODEL_IDS[ask_model],
             "judge_model": JUDGE_MODEL,
+            "temperature": temperature,
+            "workers": workers,
             "system_prompt_file": str(system_prompt_file),
             "system_prompt": system_prompt_text,
             "questions_file": str(questions_file),

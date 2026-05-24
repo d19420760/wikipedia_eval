@@ -7,7 +7,7 @@ import click
 import yaml
 from anthropic import Anthropic
 
-from wikipedia import search_wikipedia
+from wikipedia import TOP_N, search_wikipedia
 
 # Windows consoles default to cp1252 and choke on Wikipedia titles with Unicode
 # (e.g. Czech, Polish). Reconfigure stdout/stderr to UTF-8 when possible.
@@ -23,6 +23,10 @@ MODEL_IDS = {
 }
 DEFAULT_MODEL = "sonnet"
 DEFAULT_MAX_TOKENS = 4096
+# Default None = don't send. Claude 4.x family deprecated the temperature
+# parameter (the API rejects it). Pass an explicit --temperature only when
+# targeting an older model that still accepts it.
+DEFAULT_TEMPERATURE: float | None = None
 MAX_ITERATIONS = 10
 
 SEARCH_WIKIPEDIA_TOOL = {
@@ -31,17 +35,19 @@ SEARCH_WIKIPEDIA_TOOL = {
         "Look something up on English Wikipedia. The `query` parameter has two modes:\n"
         "\n"
         "1. SEARCH (default): pass a normal search query, e.g. \"Eiffel Tower history\". "
-        "Returns the top 5 matching articles with their titles, URLs, and intro extracts "
-        "(typically one paragraph each). Use this first to find which articles are "
-        "relevant and to learn their exact titles.\n"
+        "Returns up to 10 matching articles per page, each with title, URL, and intro "
+        "extract (typically one paragraph). Use the `page` parameter to fetch more "
+        "results — page=1 returns results 1-10, page=2 returns 11-20, etc. Pass page=2+ "
+        "when the first page doesn't surface the article you need. A page that returns "
+        "fewer than 10 results (or zero) means there are no further pages.\n"
         "\n"
         "2. FULL ARTICLE: pass \"article: <exact title>\", e.g. \"article: Eiffel Tower\". "
         "Returns just that one article with its full plain-text body (can be long). "
         "Use this when the intro from search mode wasn't detailed enough — typically "
-        "after a search has surfaced the right title.\n"
+        "after a search has surfaced the right title. `page` is ignored in this mode.\n"
         "\n"
-        "Typical workflow: search to find the right article(s), then request the full "
-        "article only if you need details beyond the intro."
+        "Typical workflow: search to find the right article(s), paging if needed; then "
+        "request the full article if you need details beyond the intro."
     ),
     "input_schema": {
         "type": "object",
@@ -51,6 +57,12 @@ SEARCH_WIKIPEDIA_TOOL = {
                 "description": (
                     "A search query, OR \"article: <exact title>\" to fetch the full article."
                 ),
+            },
+            "page": {
+                "type": "integer",
+                "description": "1-based page of search results (ignored in article mode). Default 1.",
+                "default": 1,
+                "minimum": 1,
             },
         },
         "required": ["query"],
@@ -74,11 +86,11 @@ def load_api_key() -> str:
     return api_key
 
 
-def format_search_results(results: list[dict]) -> str:
+def format_search_results(results: list[dict], start_index: int = 1) -> str:
     if not results:
         return "No results."
     sections = []
-    for i, r in enumerate(results, start=1):
+    for i, r in enumerate(results, start=start_index):
         sections.append(
             f"## Result {i}\n"
             f"Title: {r['title']}\n"
@@ -94,6 +106,7 @@ def run_agent(
     system_prompt: str | None,
     model: str,
     max_tokens: int,
+    temperature: float | None,
 ) -> dict:
     """Run the tool-use loop. Returns response, tool log, usage, stop_reason, iterations."""
     messages: list[dict] = [{"role": "user", "content": prompt}]
@@ -112,6 +125,8 @@ def run_agent(
         }
         if system_prompt:
             kwargs["system"] = system_prompt
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         resp = client.messages.create(**kwargs)
         usage["input_tokens"] += resp.usage.input_tokens
@@ -129,15 +144,19 @@ def run_agent(
                 continue
             if block.name == "search_wikipedia":
                 query = block.input.get("query", "")
-                results = search_wikipedia(query)
+                page = max(1, int(block.input.get("page", 1) or 1))
+                results = search_wikipedia(query, page=page)
                 tool_log.append(
                     {
                         "query": query,
+                        "page": page,
                         "num_results": len(results),
                         "result_titles": [r["title"] for r in results],
                     }
                 )
-                content = format_search_results(results)
+                content = format_search_results(
+                    results, start_index=(page - 1) * TOP_N + 1
+                )
             else:
                 content = f"Unknown tool: {block.name}"
             tool_results.append(
@@ -182,12 +201,19 @@ def run_agent(
     help="Claude model tier.",
 )
 @click.option("--max-tokens", default=DEFAULT_MAX_TOKENS, show_default=True, type=int)
+@click.option(
+    "--temperature",
+    default=DEFAULT_TEMPERATURE,
+    type=float,
+    help="Sampling temperature. Default: not sent (Claude 4.x deprecated this param).",
+)
 def cli(
     prompt: str,
     system_prompt_file: Path | None,
     output: Path | None,
     model: str,
     max_tokens: int,
+    temperature: float | None,
 ) -> None:
     """Ask Claude PROMPT, with access to a search_wikipedia tool."""
     system_prompt = (
@@ -202,6 +228,7 @@ def cli(
         system_prompt=system_prompt,
         model=model_id,
         max_tokens=max_tokens,
+        temperature=temperature,
     )
 
     click.echo("=== Response ===")
@@ -230,6 +257,7 @@ def cli(
             "prompt": prompt,
             "system_prompt": system_prompt,
             "model": model_id,
+            "temperature": temperature,
             **result,
         }
         with output.open("w", encoding="utf-8") as f:
