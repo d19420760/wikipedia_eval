@@ -138,5 +138,3 @@ Writes a new tab with one row per question (question, answer, per-dimension scor
 - `edit_gsheets.py` — unrelated helper, not part of this project
 - `pyproject.toml` — uv project config and dependencies
 - `secrets.yaml.example` — template; copy to `secrets.yaml` (gitignored)
-- `PLAN.md` — design notes for the first vertical slice
-- `CLAUDE.md` — working agreement and hard constraints from the brief
