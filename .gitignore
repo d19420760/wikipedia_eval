@@ -1,6 +1,7 @@
 secrets.yaml
 Prompt_Eng_Take-Home_Assignment.pdf
 cache/
-runs/
+runs/*
+!runs/QS3_SP3.6.yaml
 __pycache__/
 *.pyc
